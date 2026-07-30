@@ -492,7 +492,6 @@ def build_parser() -> argparse.ArgumentParser:
                 default="server",
                 help="server is required for remote plugin-action keybindings",
             )
-            command.add_argument("herdr_args", nargs=argparse.REMAINDER)
             command.set_defaults(handler=run_attach)
         else:
             command.set_defaults(handler=run_relay)
@@ -500,9 +499,22 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args, remaining = parser.parse_known_args(argv)
+    if args.command != "attach":
+        if remaining:
+            parser.error(f"unrecognized arguments: {' '.join(remaining)}")
+        return args
+
+    if remaining[:1] == ["--"]:
+        remaining = remaining[1:]
+    args.herdr_args = remaining
+    return args
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_cli_args(argv)
     try:
         return int(args.handler(args))
     except OpenEditorError as error:

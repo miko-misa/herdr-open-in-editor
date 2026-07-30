@@ -151,5 +151,29 @@ class RequestTests(unittest.TestCase):
                 plugin.run_request(args)
 
 
+class ArgumentParsingTests(unittest.TestCase):
+    def test_attach_options_work_after_target(self):
+        args = plugin.parse_cli_args(
+            ["attach", "workbox", "--editor", "zed", "--remote-port", "47832"]
+        )
+        self.assertEqual(args.target, "workbox")
+        self.assertEqual(args.editor, "zed")
+        self.assertEqual(args.remote_port, 47832)
+        self.assertEqual(args.herdr_args, [])
+
+    def test_attach_options_work_before_target(self):
+        args = plugin.parse_cli_args(["attach", "--editor", "vscode", "workbox"])
+        self.assertEqual(args.target, "workbox")
+        self.assertEqual(args.editor, "vscode")
+        self.assertEqual(args.herdr_args, [])
+
+    def test_attach_forwards_remaining_herdr_arguments(self):
+        args = plugin.parse_cli_args(
+            ["attach", "workbox", "--editor", "zed", "--", "--session", "demo"]
+        )
+        self.assertEqual(args.editor, "zed")
+        self.assertEqual(args.herdr_args, ["--session", "demo"])
+
+
 if __name__ == "__main__":
     unittest.main()

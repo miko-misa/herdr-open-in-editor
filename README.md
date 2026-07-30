@@ -84,6 +84,27 @@ For VS Code:
   attach workbox --editor vscode
 ```
 
+To keep the original `herdr --remote workbox` command, add this transparent
+wrapper to `~/.zshrc`:
+
+```zsh
+herdr() {
+  if [[ "$1" == "--remote" && -n "$2" ]]; then
+    local target="$2"
+    shift 2
+
+    "$HOME/.local/share/herdr-open-in-editor/open_in_editor.py" \
+      attach "$target" --editor zed "$@"
+  else
+    command herdr "$@"
+  fi
+}
+```
+
+Reload the shell with `source ~/.zshrc`. Local commands still run the real
+binary; only `herdr --remote <target>` starts the editor relay. Use
+`command herdr --remote <target>` to bypass the wrapper explicitly.
+
 The wrapper:
 
 1. starts a loopback-only local relay;

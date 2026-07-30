@@ -43,9 +43,12 @@ Requirements:
    Check for a conflict first. If the key is already used, stop and ask me which
    binding to use instead.
 8. Reload the remote Herdr config.
-9. Start the remote session from the local machine through:
-   `~/.local/share/herdr-open-in-editor/open_in_editor.py attach <SSH_ALIAS> --editor zed`
-   Use `--editor vscode` instead if VS Code is preferred.
+9. Add the transparent `herdr` shell function documented in README to the
+   local shell config without overwriting unrelated configuration. Start the
+   remote session with the unchanged command:
+   `herdr --remote <SSH_ALIAS>`
+   Configure the function with `--editor vscode` instead if VS Code is
+   preferred.
 10. In Herdr, focus a workspace backed by a linked worktree and invoke
     `prefix+shift+o`. Verify that the LOCAL editor opens the exact remote
     worktree checkout, not the main repository and not merely the pane cwd.
