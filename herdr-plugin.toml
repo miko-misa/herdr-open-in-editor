@@ -1,0 +1,27 @@
+id = "timofey-tk.open-in-editor"
+name = "Open in Editor"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Open the active workspace checkout in a local or remote-aware editor"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open"
+title = "Open in editor"
+description = "Use the relay when attached remotely, otherwise launch a local editor"
+contexts = ["workspace"]
+command = ["python3", "open_in_editor.py", "request", "--editor", "auto"]
+
+[[actions]]
+id = "open-vscode"
+title = "Open in VS Code"
+description = "Open the active workspace checkout in VS Code"
+contexts = ["workspace"]
+command = ["python3", "open_in_editor.py", "request", "--editor", "vscode"]
+
+[[actions]]
+id = "open-zed"
+title = "Open in Zed"
+description = "Open the active workspace checkout in Zed"
+contexts = ["workspace"]
+command = ["python3", "open_in_editor.py", "request", "--editor", "zed"]
