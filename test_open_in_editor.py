@@ -1,6 +1,8 @@
 import json
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import open_in_editor as plugin
@@ -173,6 +175,169 @@ class ArgumentParsingTests(unittest.TestCase):
         )
         self.assertEqual(args.editor, "zed")
         self.assertEqual(args.herdr_args, ["--session", "demo"])
+
+
+def _pane_list_reply(*panes):
+    return json.dumps(
+        {"id": "cli:pane:list", "result": {"panes": list(panes), "type": "pane_list"}}
+    )
+
+
+class MirrorPaneTests(unittest.TestCase):
+    MAP = {
+        "workspaces": {"w1": {"localId": "w0", "lastRemoteLabel": "scholion"}},
+        "panes": {"w1:p1": {"localId": "w0:p2", "seq": 217, "reported": "claude"}},
+    }
+
+    def test_finds_the_host_and_remote_pane_behind_a_local_pane(self):
+        self.assertEqual(
+            plugin.find_mirrored_pane("w0:p2", {"buildbox": self.MAP}, "w0"),
+            ("buildbox", "w1:p1"),
+        )
+
+    def test_an_ordinary_local_pane_is_not_mirrored(self):
+        self.assertIsNone(plugin.find_mirrored_pane("w3:p1", {"buildbox": self.MAP}, "w3"))
+
+    def test_a_stale_map_naming_a_recycled_pane_id_is_rejected(self):
+        # Same local pane id, different workspace: the pane was closed and its
+        # id handed to something unrelated. Matching anyway would open a remote
+        # directory that has nothing to do with what the user is looking at.
+        self.assertIsNone(plugin.find_mirrored_pane("w0:p2", {"buildbox": self.MAP}, "w7"))
+
+    def test_an_incomplete_map_still_matches(self):
+        # Absent corroboration is not a mismatch.
+        without_workspaces = {"panes": self.MAP["panes"]}
+        self.assertEqual(
+            plugin.find_mirrored_pane("w0:p2", {"buildbox": without_workspaces}, "w0"),
+            ("buildbox", "w1:p1"),
+        )
+
+    def test_malformed_map_entries_are_skipped_rather_than_raised_on(self):
+        maps = {"broken": {"panes": {"w1:p1": "not-an-object"}}, "ok": self.MAP}
+        self.assertEqual(
+            plugin.find_mirrored_pane("w0:p2", maps, "w0"),
+            ("ok", "w1:p1"),
+        )
+
+    def test_reads_the_working_directory_of_the_named_pane_only(self):
+        output = _pane_list_reply(
+            {"pane_id": "w1:p1", "cwd": "/home/dev/scholion"},
+            {"pane_id": "w2:p1", "cwd": "/home/dev/anypages"},
+        )
+        self.assertEqual(
+            plugin.parse_remote_pane_cwd(output, "w2:p1"),
+            "/home/dev/anypages",
+        )
+
+    def test_tolerates_a_login_banner_ahead_of_the_json(self):
+        output = "Welcome to buildbox\nLast login: yesterday\n" + _pane_list_reply(
+            {"pane_id": "w1:p1", "cwd": "/home/dev/scholion"}
+        )
+        self.assertEqual(
+            plugin.parse_remote_pane_cwd(output, "w1:p1"),
+            "/home/dev/scholion",
+        )
+
+    def test_a_pane_that_vanished_remotely_is_an_error_not_a_wrong_path(self):
+        output = _pane_list_reply({"pane_id": "w9:p9", "cwd": "/home/dev/other"})
+        with self.assertRaises(plugin.OpenEditorError):
+            plugin.parse_remote_pane_cwd(output, "w1:p1")
+
+    def test_refuses_a_non_absolute_remote_path(self):
+        output = _pane_list_reply({"pane_id": "w1:p1", "cwd": "relative/path"})
+        with self.assertRaises(plugin.OpenEditorError):
+            plugin.parse_remote_pane_cwd(output, "w1:p1")
+
+    def test_the_remote_query_cannot_hang_on_a_password_prompt(self):
+        command = plugin.remote_pane_list_command("buildbox")
+        self.assertIn("BatchMode=yes", command)
+        self.assertEqual(command[-2:], ["buildbox", "herdr pane list"])
+
+    def test_a_hostile_ssh_target_is_rejected(self):
+        with self.assertRaises(plugin.OpenEditorError):
+            plugin.remote_pane_list_command("-oProxyCommand=touch /tmp/pwned")
+
+    def test_missing_mirror_state_leaves_the_plugin_unchanged(self):
+        self.assertEqual(plugin.load_mirror_maps(Path("/nonexistent/herdr-mirror")), {})
+
+    def test_a_remote_without_herdr_is_diagnosed_as_such(self):
+        with self.assertRaises(plugin.OpenEditorError) as raised:
+            plugin.parse_remote_pane_cwd("herdr: command not found\n", "w1:p1")
+        self.assertIn("PATH", str(raised.exception))
+
+    def test_resolves_a_mirror_pane_end_to_end(self):
+        # Through the real state files rather than around them: this is the
+        # only test that proves the map on disk reaches the editor argv.
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "buildbox-map.json").write_text(
+                json.dumps(self.MAP), encoding="utf-8"
+            )
+            hosts = state / "hosts.toml"
+            hosts.write_text('[hosts.buildbox]\ntarget = "buildbox"\n', encoding="utf-8")
+            issued = []
+
+            def runner(command):
+                issued.append(command)
+                return _pane_list_reply({"pane_id": "w1:p1", "cwd": "/home/dev/scholion"})
+
+            resolved = plugin.resolve_mirror_location(
+                {"focused_pane_id": "w0:p2", "workspace_id": "w0"},
+                runner=runner,
+                state_dir=state,
+                hosts_file=hosts,
+            )
+        self.assertEqual(resolved, ("buildbox", "/home/dev/scholion"))
+        self.assertEqual(issued, [plugin.remote_pane_list_command("buildbox")])
+        self.assertEqual(
+            plugin.remote_editor_command("zed", *resolved),
+            ["zed", "ssh://buildbox/home/dev/scholion"],
+        )
+
+    def test_an_ordinary_pane_never_reaches_ssh(self):
+        # The cost of the feature on the common path has to stay zero.
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "buildbox-map.json").write_text(
+                json.dumps(self.MAP), encoding="utf-8"
+            )
+
+            def runner(command):
+                raise AssertionError(f"unexpected SSH for a local pane: {command}")
+
+            self.assertIsNone(
+                plugin.resolve_mirror_location(
+                    {"focused_pane_id": "w3:p1", "workspace_id": "w3"},
+                    runner=runner,
+                    state_dir=state,
+                )
+            )
+
+    def test_a_context_without_a_pane_id_resolves_to_nothing(self):
+        self.assertIsNone(plugin.resolve_mirror_location({"workspace_cwd": "/repo"}))
+
+
+class MirrorHostsFileTests(unittest.TestCase):
+    def test_prefers_the_configured_ssh_target_over_the_host_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hosts = Path(directory) / "hosts.toml"
+            hosts.write_text(
+                '[hosts.mini]\ntarget = "dev@buildbox.internal"\n', encoding="utf-8"
+            )
+            self.assertEqual(
+                plugin.mirror_ssh_target("mini", hosts), "dev@buildbox.internal"
+            )
+
+    def test_falls_back_to_the_host_key_when_unconfigured(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hosts = Path(directory) / "hosts.toml"
+            hosts.write_text("[hosts.mini]\nprefix = \"mini\"\n", encoding="utf-8")
+            self.assertEqual(plugin.mirror_ssh_target("mini", hosts), "mini")
+
+    def test_a_missing_hosts_file_falls_back_to_the_host_key(self):
+        self.assertEqual(
+            plugin.mirror_ssh_target("mini", Path("/nonexistent/hosts.toml")), "mini"
+        )
 
 
 if __name__ == "__main__":

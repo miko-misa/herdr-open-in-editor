@@ -22,6 +22,10 @@ DEFAULT_REMOTE_PORT = 47831
 MAX_MESSAGE_BYTES = 64 * 1024
 EDITORS = ("auto", "vscode", "zed")
 
+MIRROR_STATE_DIR = Path.home() / ".local" / "state" / "herdr-mirror"
+MIRROR_HOSTS_FILE = Path.home() / ".config" / "herdr-mirror" / "hosts.toml"
+MIRROR_SSH_TIMEOUT_SECONDS = 15
+
 
 class OpenEditorError(RuntimeError):
     """Expected user-facing failure."""
@@ -73,6 +77,218 @@ def load_plugin_context(env: dict[str, str] | None = None) -> dict[str, Any]:
 def is_probably_remote_environment(env: dict[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
     return any(source.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
+
+
+def load_mirror_maps(state_dir: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Read herdr-mirror's `<host>-map.json` state files, keyed by host name.
+
+    Absent, unreadable or malformed files are skipped rather than raised on:
+    this whole path is an opportunistic enhancement, and a mirror that is not
+    installed must leave the plugin behaving exactly as it did before.
+    """
+    directory = MIRROR_STATE_DIR if state_dir is None else state_dir
+    maps: dict[str, dict[str, Any]] = {}
+    try:
+        entries = sorted(directory.glob("*-map.json"))
+    except OSError:
+        return maps
+    for entry in entries:
+        try:
+            parsed = json.loads(entry.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            maps[entry.name[: -len("-map.json")]] = parsed
+    return maps
+
+
+def _mirrored_workspace_agrees(
+    host_map: dict[str, Any],
+    remote_pane_id: str,
+    local_workspace_id: str | None,
+) -> bool:
+    """Whether the map's workspace entry corroborates a pane match.
+
+    Herdr reuses pane ids once a pane is closed, so a map left stale by a
+    stopped daemon can name a local id that some unrelated pane now answers to.
+    Both halves of the map would have to be stale and agree for that to survive
+    this check, and a wrong match here opens somebody's unrelated directory
+    without saying anything. Absent data is not evidence of a mismatch, so an
+    incomplete map still passes.
+    """
+    if local_workspace_id is None:
+        return True
+    workspaces = host_map.get("workspaces")
+    if not isinstance(workspaces, dict):
+        return True
+    entry = workspaces.get(remote_pane_id.split(":", 1)[0])
+    if not isinstance(entry, dict):
+        return True
+    mapped = _nonempty_string(entry.get("localId"))
+    return mapped is None or mapped == local_workspace_id
+
+
+def find_mirrored_pane(
+    local_pane_id: str,
+    maps: dict[str, dict[str, Any]],
+    local_workspace_id: str | None = None,
+) -> tuple[str, str] | None:
+    """Resolve a local pane id to the `(host, remote pane id)` it mirrors.
+
+    `None` means the pane is an ordinary local one, which is the common case
+    and must stay indistinguishable from mirror not being installed at all.
+    """
+    if not local_pane_id:
+        return None
+    for host in sorted(maps):
+        panes = maps[host].get("panes")
+        if not isinstance(panes, dict):
+            continue
+        for remote_pane_id, entry in sorted(panes.items()):
+            if not isinstance(entry, dict):
+                continue
+            if _nonempty_string(entry.get("localId")) != local_pane_id:
+                continue
+            if _mirrored_workspace_agrees(maps[host], remote_pane_id, local_workspace_id):
+                return host, remote_pane_id
+    return None
+
+
+def mirror_ssh_target(host: str, hosts_file: Path | None = None) -> str:
+    """SSH target for a mirror host name.
+
+    `hosts.toml` lets a host be keyed by a label distinct from its SSH target,
+    so the key is only the fallback. `tomllib` is 3.11+; on older interpreters
+    the key is all we have, which is right whenever the two agree.
+    """
+    path = MIRROR_HOSTS_FILE if hosts_file is None else hosts_file
+    try:
+        import tomllib
+    except ImportError:
+        return host
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return host
+    hosts = config.get("hosts")
+    entry = hosts.get(host) if isinstance(hosts, dict) else None
+    target = _nonempty_string(entry.get("target")) if isinstance(entry, dict) else None
+    return target or host
+
+
+def remote_pane_list_command(target: str) -> list[str]:
+    """Argv that asks the mirrored host's Herdr for its panes.
+
+    `BatchMode=yes` matters: this runs detached from any terminal the user can
+    answer, so a host that would prompt for a password has to fail rather than
+    hang forever holding the action open.
+    """
+    return [
+        "ssh",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        f"ConnectTimeout={MIRROR_SSH_TIMEOUT_SECONDS}",
+        "--",
+        normalized_ssh_authority(target),
+        "herdr pane list",
+    ]
+
+
+def parse_remote_pane_cwd(output: str, remote_pane_id: str) -> str:
+    """Pull one pane's working directory out of `herdr pane list` output.
+
+    Scanned line by line because a login shell may print a banner ahead of the
+    JSON, and the reply is one object per line.
+    """
+    answered = False
+    for line in output.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            message = json.loads(line)
+        except ValueError:
+            continue
+        result = message.get("result") if isinstance(message, dict) else None
+        panes = result.get("panes") if isinstance(result, dict) else None
+        if not isinstance(panes, list):
+            continue
+        answered = True
+        for pane in panes:
+            if not isinstance(pane, dict) or pane.get("pane_id") != remote_pane_id:
+                continue
+            cwd = _nonempty_string(pane.get("cwd")) or _nonempty_string(
+                pane.get("foreground_cwd")
+            )
+            if cwd is None:
+                raise OpenEditorError(
+                    f"mirrored pane {remote_pane_id} reported no working directory"
+                )
+            if not cwd.startswith("/"):
+                raise OpenEditorError(f"refusing non-absolute remote path: {cwd!r}")
+            return cwd
+    if not answered:
+        raise OpenEditorError(
+            "the mirrored host did not answer `herdr pane list`; "
+            "check that herdr is on its PATH for non-interactive SSH"
+        )
+    raise OpenEditorError(
+        f"mirrored pane {remote_pane_id} is gone from the remote Herdr; "
+        "`herdr-mirror once` will resync the map"
+    )
+
+
+def resolve_mirror_location(
+    context: dict[str, Any],
+    runner: Callable[[list[str]], str] | None = None,
+    state_dir: Path | None = None,
+    hosts_file: Path | None = None,
+) -> tuple[str, str] | None:
+    """`(ssh target, remote path)` when the focused pane is a herdr-mirror pane.
+
+    A mirror pane shows a remote terminal, but every path Herdr reports for it
+    describes the local placeholder the stream is painted into, so the ordinary
+    workspace path is meaningless here. The remote host is the only thing that
+    knows where the pane actually is, so it is asked.
+
+    `None` when the pane is not mirrored, and that is deliberately quiet.
+    """
+    local_pane_id = _nonempty_string(context.get("focused_pane_id"))
+    if local_pane_id is None:
+        return None
+    mirrored = find_mirrored_pane(
+        local_pane_id,
+        load_mirror_maps(state_dir),
+        _nonempty_string(context.get("workspace_id")),
+    )
+    if mirrored is None:
+        return None
+    host, remote_pane_id = mirrored
+    target = mirror_ssh_target(host, hosts_file)
+    run = _run_remote_pane_list if runner is None else runner
+    output = run(remote_pane_list_command(target))
+    return target, parse_remote_pane_cwd(output, remote_pane_id)
+
+
+def _run_remote_pane_list(command: list[str]) -> str:
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=MIRROR_SSH_TIMEOUT_SECONDS * 2,
+        )
+    except FileNotFoundError as error:
+        raise OpenEditorError("ssh is not installed") from error
+    except subprocess.TimeoutExpired as error:
+        raise OpenEditorError(f"timed out asking {command[-2]} for its panes") from error
+    if completed.returncode != 0:
+        detail = completed.stderr.strip().splitlines()
+        raise OpenEditorError(
+            f"could not reach {command[-2]}: {detail[-1] if detail else 'ssh failed'}"
+        )
+    return completed.stdout
 
 
 def normalized_ssh_authority(target: str) -> str:
@@ -359,6 +575,19 @@ def reverse_tunnel_start_command(
 
 def run_request(args: argparse.Namespace) -> int:
     context = load_plugin_context()
+
+    # Ahead of the relay, because the two answer different questions. The relay
+    # carries a path from a Herdr running on the far side back to the editor
+    # here; a mirror pane is the reverse, a Herdr running here showing a pane
+    # that lives on the far side. Handing a mirror's placeholder path to the
+    # relay would open the wrong directory rather than fail.
+    mirrored = resolve_mirror_location(context)
+    if mirrored is not None:
+        target, remote_path = mirrored
+        editor = resolve_editor(args.editor)
+        launch_detached(remote_editor_command(editor, target, remote_path))
+        return 0
+
     path = select_workspace_path(context)
     relay_error: OpenEditorError | None = None
     try:
