@@ -251,7 +251,26 @@ class MirrorPaneTests(unittest.TestCase):
     def test_the_remote_query_cannot_hang_on_a_password_prompt(self):
         command = plugin.remote_pane_list_command("buildbox")
         self.assertIn("BatchMode=yes", command)
-        self.assertEqual(command[-2:], ["buildbox", "herdr pane list"])
+        self.assertEqual(command[-2], "buildbox")
+
+    def test_the_remote_herdr_is_not_assumed_to_be_on_the_path(self):
+        # A non-interactive `ssh host herdr ...` never sourced the user's
+        # profile, so an install under ~/.local/bin is invisible to it. This is
+        # not hypothetical: of two mirrored hosts it broke one of them.
+        remote = plugin.remote_pane_list_command("buildbox")[-1]
+        self.assertIn("command -v herdr", remote)
+        self.assertIn("~/.local/bin/herdr", remote)
+        self.assertTrue(remote.endswith(" pane list"), remote)
+
+    def test_the_fallback_never_relies_on_the_remote_login_shell(self):
+        # fish and csh reject `$(...)`, and `ssh host cmd` hands the string to
+        # whatever shell the user has. Only `sh -c '<literal>'` parses alike.
+        remote = plugin.remote_pane_list_command("buildbox")[-1]
+        self.assertTrue(remote.startswith("sh -c '"), remote)
+
+    def test_an_explicitly_configured_remote_binary_wins(self):
+        command = plugin.remote_pane_list_command("buildbox", "/opt/herdr/bin/herdr")
+        self.assertEqual(command[-1], "/opt/herdr/bin/herdr pane list")
 
     def test_a_hostile_ssh_target_is_rejected(self):
         with self.assertRaises(plugin.OpenEditorError):
@@ -318,25 +337,34 @@ class MirrorPaneTests(unittest.TestCase):
 
 
 class MirrorHostsFileTests(unittest.TestCase):
-    def test_prefers_the_configured_ssh_target_over_the_host_key(self):
+    def settings(self, body, host="mini"):
         with tempfile.TemporaryDirectory() as directory:
             hosts = Path(directory) / "hosts.toml"
-            hosts.write_text(
-                '[hosts.mini]\ntarget = "dev@buildbox.internal"\n', encoding="utf-8"
-            )
-            self.assertEqual(
-                plugin.mirror_ssh_target("mini", hosts), "dev@buildbox.internal"
-            )
+            hosts.write_text(body, encoding="utf-8")
+            return plugin.mirror_host_settings(host, hosts)
+
+    def test_prefers_the_configured_ssh_target_over_the_host_key(self):
+        target, _ = self.settings('[hosts.mini]\ntarget = "dev@buildbox.internal"\n')
+        self.assertEqual(target, "dev@buildbox.internal")
 
     def test_falls_back_to_the_host_key_when_unconfigured(self):
-        with tempfile.TemporaryDirectory() as directory:
-            hosts = Path(directory) / "hosts.toml"
-            hosts.write_text("[hosts.mini]\nprefix = \"mini\"\n", encoding="utf-8")
-            self.assertEqual(plugin.mirror_ssh_target("mini", hosts), "mini")
+        target, _ = self.settings('[hosts.mini]\nprefix = "mini"\n')
+        self.assertEqual(target, "mini")
 
-    def test_a_missing_hosts_file_falls_back_to_the_host_key(self):
+    def test_honours_the_remote_binary_herdr_mirror_was_told_to_use(self):
+        _, remote = self.settings(
+            '[hosts.mini]\nremote_bin = "/opt/herdr/bin/herdr"\n'
+        )
+        self.assertEqual(remote, "/opt/herdr/bin/herdr")
+
+    def test_falls_back_to_the_same_resolution_herdr_mirror_uses(self):
+        _, remote = self.settings('[hosts.mini]\nprefix = "mini"\n')
+        self.assertEqual(remote, plugin.MIRROR_REMOTE_HERDR)
+
+    def test_a_missing_hosts_file_falls_back_to_the_defaults(self):
         self.assertEqual(
-            plugin.mirror_ssh_target("mini", Path("/nonexistent/hosts.toml")), "mini"
+            plugin.mirror_host_settings("mini", Path("/nonexistent/hosts.toml")),
+            ("mini", plugin.MIRROR_REMOTE_HERDR),
         )
 
 

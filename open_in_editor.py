@@ -26,6 +26,20 @@ MIRROR_STATE_DIR = Path.home() / ".local" / "state" / "herdr-mirror"
 MIRROR_HOSTS_FILE = Path.home() / ".config" / "herdr-mirror" / "hosts.toml"
 MIRROR_SSH_TIMEOUT_SECONDS = 15
 
+# How to run herdr on a mirrored host, copied verbatim from herdr-mirror's own
+# `remote_bin_expr` so both reach the same binary on the same host. A plain
+# `herdr` is not enough: a non-interactive `ssh host herdr ...` gets a shell
+# that never sourced the user's profile, so an install under ~/.local/bin is
+# simply not on the PATH.
+#
+# The `$(...)` substitution has to run under a POSIX sh rather than the remote
+# login shell, which `ssh host cmd` would otherwise hand it to: fish rejects
+# `$(...)` in command position and csh rejects it outright. Every shell can
+# parse `sh -c '<literal>' herdr` plus trailing words, which land in `"$@"`.
+MIRROR_REMOTE_HERDR = (
+    "sh -c 'exec \"$(command -v herdr 2>/dev/null || echo ~/.local/bin/herdr)\" \"$@\"' herdr"
+)
+
 
 class OpenEditorError(RuntimeError):
     """Expected user-facing failure."""
@@ -154,29 +168,36 @@ def find_mirrored_pane(
     return None
 
 
-def mirror_ssh_target(host: str, hosts_file: Path | None = None) -> str:
-    """SSH target for a mirror host name.
+def mirror_host_settings(host: str, hosts_file: Path | None = None) -> tuple[str, str]:
+    """`(ssh target, herdr invocation)` for a mirror host name.
 
-    `hosts.toml` lets a host be keyed by a label distinct from its SSH target,
-    so the key is only the fallback. `tomllib` is 3.11+; on older interpreters
-    the key is all we have, which is right whenever the two agree.
+    Both come from herdr-mirror's own `hosts.toml`, and both fall back to what
+    herdr-mirror falls back to. A host may be keyed by a label distinct from
+    its SSH target, and `remote_bin` names the remote binary when it is not
+    simply on the PATH — see [MIRROR_REMOTE_HERDR].
+
+    `tomllib` is 3.11+; on older interpreters the defaults are all we have,
+    which is right whenever the file says nothing unusual.
     """
     path = MIRROR_HOSTS_FILE if hosts_file is None else hosts_file
+    entry: Any = None
     try:
         import tomllib
-    except ImportError:
-        return host
-    try:
+
         config = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return host
+    except (ImportError, OSError, ValueError):
+        config = {}
     hosts = config.get("hosts")
-    entry = hosts.get(host) if isinstance(hosts, dict) else None
-    target = _nonempty_string(entry.get("target")) if isinstance(entry, dict) else None
-    return target or host
+    if isinstance(hosts, dict):
+        entry = hosts.get(host)
+    if not isinstance(entry, dict):
+        entry = {}
+    target = _nonempty_string(entry.get("target")) or host
+    remote_bin = _nonempty_string(entry.get("remote_bin")) or MIRROR_REMOTE_HERDR
+    return target, remote_bin
 
 
-def remote_pane_list_command(target: str) -> list[str]:
+def remote_pane_list_command(target: str, remote_herdr: str | None = None) -> list[str]:
     """Argv that asks the mirrored host's Herdr for its panes.
 
     `BatchMode=yes` matters: this runs detached from any terminal the user can
@@ -191,7 +212,7 @@ def remote_pane_list_command(target: str) -> list[str]:
         f"ConnectTimeout={MIRROR_SSH_TIMEOUT_SECONDS}",
         "--",
         normalized_ssh_authority(target),
-        "herdr pane list",
+        f"{remote_herdr or MIRROR_REMOTE_HERDR} pane list",
     ]
 
 
@@ -265,9 +286,9 @@ def resolve_mirror_location(
     if mirrored is None:
         return None
     host, remote_pane_id = mirrored
-    target = mirror_ssh_target(host, hosts_file)
+    target, remote_herdr = mirror_host_settings(host, hosts_file)
     run = _run_remote_pane_list if runner is None else runner
-    output = run(remote_pane_list_command(target))
+    output = run(remote_pane_list_command(target, remote_herdr))
     return target, parse_remote_pane_cwd(output, remote_pane_id)
 
 
@@ -285,8 +306,19 @@ def _run_remote_pane_list(command: list[str]) -> str:
         raise OpenEditorError(f"timed out asking {command[-2]} for its panes") from error
     if completed.returncode != 0:
         detail = completed.stderr.strip().splitlines()
+        last = detail[-1] if detail else ""
+        # 255 is ssh's own; anything else came back from the remote shell, and
+        # 127 there means the binary was not found rather than the host being
+        # unreachable. Saying "could not reach" for that sends the user to
+        # debug their network instead of their PATH.
+        if completed.returncode == 127:
+            raise OpenEditorError(
+                f"herdr is not installed where {command[-2]} could find it "
+                f"({last or 'command not found'}); set `remote_bin` for that "
+                "host in ~/.config/herdr-mirror/hosts.toml"
+            )
         raise OpenEditorError(
-            f"could not reach {command[-2]}: {detail[-1] if detail else 'ssh failed'}"
+            f"could not reach {command[-2]}: {last or 'ssh failed'}"
         )
     return completed.stdout
 
