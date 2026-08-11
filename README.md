@@ -184,7 +184,7 @@ Without herdr-mirror installed there is nothing to find, and an ordinary local
 workspace never reaches this path at all, so behaviour is unchanged and no SSH
 is attempted.
 
-Two failures are worth recognising:
+Three failures are worth recognising:
 
 - *herdr is not installed where … could find it* — neither the PATH nor
   `~/.local/bin` has it. Set `remote_bin` for that host in
