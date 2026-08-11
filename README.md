@@ -157,10 +157,16 @@ mini: scholion   →  zed  ssh://buildbox/home/dev/scholion
 ```
 
 Nothing has to be configured. The pane is looked up in herdr-mirror's own
-`~/.local/state/herdr-mirror/<host>-map.json`, the SSH target comes from
-`~/.config/herdr-mirror/hosts.toml`, and the remote host is asked for the
-pane's working directory with `herdr pane list`. Passwordless SSH to the
-mirrored host is the one requirement, which herdr-mirror already needs.
+`~/.local/state/herdr-mirror/<host>-map.json`, and the SSH target, along with
+`remote_bin` if you set one, comes from `~/.config/herdr-mirror/hosts.toml`.
+The remote host is then asked for the pane's working directory with
+`herdr pane list`, resolved the way herdr-mirror resolves it: the PATH first,
+then `~/.local/bin/herdr`. A non-interactive `ssh host herdr …` never sourced
+the login profile, so an install under `~/.local/bin` is otherwise invisible
+to it.
+
+Passwordless SSH to the mirrored host is the one requirement, which
+herdr-mirror already needs.
 
 Without herdr-mirror installed there is nothing to find, and an ordinary local
 workspace never reaches this path at all, so behaviour is unchanged and no SSH
@@ -168,9 +174,11 @@ is attempted.
 
 Two failures are worth recognising:
 
-- *the mirrored host did not answer `herdr pane list`* — `herdr` is not on the
-  remote's PATH for non-interactive SSH. `ssh <host> 'herdr pane list'` shows
-  the same thing.
+- *herdr is not installed where … could find it* — neither the PATH nor
+  `~/.local/bin` has it. Set `remote_bin` for that host in
+  `~/.config/herdr-mirror/hosts.toml`; herdr-mirror reads the same key.
+- *the mirrored host did not answer `herdr pane list`* — it replied, but with
+  something other than a pane list. `ssh <host> 'herdr pane list'` shows what.
 - *mirrored pane … is gone from the remote Herdr* — the map is stale. Run
   `herdr-mirror once`, or start the daemon.
 
