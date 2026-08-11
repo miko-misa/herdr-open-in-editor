@@ -7,9 +7,13 @@ Repository: `timofey-TK/herdr-open-in-editor`
 
 The selected path is, in order:
 
-1. the current worktree `checkout_path`;
-2. the workspace cwd;
-3. the focused pane cwd.
+1. the remote checkout, when the focused pane is a [herdr-mirror] pane
+   (see [Mirrored panes](#mirrored-panes));
+2. the current worktree `checkout_path`;
+3. the workspace cwd;
+4. the focused pane cwd.
+
+[herdr-mirror]: https://github.com/nikok6/herdr-mirror
 
 ## Install the plugin
 
@@ -135,6 +139,40 @@ server config or with:
 ```bash
 herdr plugin action invoke timofey-tk.open-in-editor.open
 ```
+
+## Mirrored panes
+
+[herdr-mirror] streams a pane from another host into a local workspace. Herdr
+reports that pane's path as the local placeholder the stream is painted into,
+so without help this action would open
+`~/.local/state/herdr-mirror/.mirror-pane` rather than the project on screen.
+
+When the focused pane is a mirrored one, the plugin resolves where it really
+is and opens it over SSH — the same `ssh://host/path` and
+`--remote ssh-remote+host` commands the relay already uses:
+
+```
+mini: scholion   →  zed  ssh://buildbox/home/dev/scholion
+                    code --remote ssh-remote+buildbox /home/dev/scholion
+```
+
+Nothing has to be configured. The pane is looked up in herdr-mirror's own
+`~/.local/state/herdr-mirror/<host>-map.json`, the SSH target comes from
+`~/.config/herdr-mirror/hosts.toml`, and the remote host is asked for the
+pane's working directory with `herdr pane list`. Passwordless SSH to the
+mirrored host is the one requirement, which herdr-mirror already needs.
+
+Without herdr-mirror installed there is nothing to find, and an ordinary local
+workspace never reaches this path at all, so behaviour is unchanged and no SSH
+is attempted.
+
+Two failures are worth recognising:
+
+- *the mirrored host did not answer `herdr pane list`* — `herdr` is not on the
+  remote's PATH for non-interactive SSH. `ssh <host> 'herdr pane list'` shows
+  the same thing.
+- *mirrored pane … is gone from the remote Herdr* — the map is stale. Run
+  `herdr-mirror once`, or start the daemon.
 
 ## Tests
 
