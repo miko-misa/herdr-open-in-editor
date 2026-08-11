@@ -1,9 +1,17 @@
 # Open in Editor
 
+> **This is a fork.** The upstream plugin is
+> [timofey-TK/herdr-open-in-editor](https://github.com/timofey-TK/herdr-open-in-editor)
+> and all credit for it belongs there. The only difference is support for
+> [herdr-mirror] panes, offered upstream as
+> [PR #1](https://github.com/timofey-TK/herdr-open-in-editor/pull/1). This fork
+> exists so the feature is usable while that PR is considered, and it will be
+> retired if the PR is merged. Prefer upstream unless you mirror panes.
+
 A local Herdr plugin that opens the active workspace checkout in VS Code or
 Zed. The same action supports both local Herdr sessions and `herdr --remote`.
 
-Repository: `timofey-TK/herdr-open-in-editor`
+Upstream repository: `timofey-TK/herdr-open-in-editor`
 
 The selected path is, in order:
 
@@ -20,8 +28,12 @@ The selected path is, in order:
 Install it on every machine where the Herdr server runs:
 
 ```bash
-herdr plugin install timofey-TK/herdr-open-in-editor
+herdr plugin install miko-misa/herdr-open-in-editor
 ```
+
+This fork keeps the upstream plugin id (`timofey-tk.open-in-editor`), so it
+replaces an existing install and every keybinding keeps working. Switching
+back is the same command with `timofey-TK`.
 
 During local development, link a checkout instead:
 
