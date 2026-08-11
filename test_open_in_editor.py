@@ -336,6 +336,87 @@ class MirrorPaneTests(unittest.TestCase):
         self.assertIsNone(plugin.resolve_mirror_location({"workspace_cwd": "/repo"}))
 
 
+class NotificationTests(unittest.TestCase):
+    def test_uses_the_binary_the_running_server_came_from(self):
+        # A bare `herdr` off the PATH could be a different install talking to a
+        # different socket.
+        command = plugin.notification_command(
+            "Opening", "buildbox", env={"HERDR_BIN_PATH": "/opt/herdr/bin/herdr"}
+        )
+        self.assertEqual(command[0], "/opt/herdr/bin/herdr")
+        self.assertEqual(command[1:4], ["notification", "show", "Opening"])
+        self.assertEqual(command[-2:], ["--body", "buildbox"])
+
+    def test_asks_for_the_corner_of_the_frame(self):
+        command = plugin.notification_command("Opening", env={})
+        self.assertEqual(command[command.index("--position") + 1], "bottom-left")
+
+    def test_an_empty_body_is_left_off_rather_than_sent_blank(self):
+        # Herdr rejects a notification whose text sanitizes to nothing.
+        self.assertNotIn("--body", plugin.notification_command("Opening", "", env={}))
+
+    def test_a_toast_that_cannot_be_shown_never_fails_the_open(self):
+        def explode(command):
+            raise OSError("no such binary")
+
+        plugin.notify("Opening", "buildbox", env={}, runner=explode)
+
+    def test_names_the_workspace_the_user_is_looking_at(self):
+        sent = []
+        original = plugin.notify
+        plugin.notify = lambda title, body=None, **kw: sent.append((title, body))
+        try:
+            plugin.announce_remote_open({"workspace_label": "mini: scholion"}, "buildbox")
+        finally:
+            plugin.notify = original
+        self.assertEqual(sent[0][0], "Opening mini: scholion")
+        self.assertIn("buildbox", sent[0][1])
+
+    def test_falls_back_to_the_host_when_the_workspace_is_unlabelled(self):
+        sent = []
+        original = plugin.notify
+        plugin.notify = lambda title, body=None, **kw: sent.append((title, body))
+        try:
+            plugin.announce_remote_open({}, "buildbox")
+        finally:
+            plugin.notify = original
+        self.assertEqual(sent[0][0], "Opening buildbox")
+
+    def test_the_announcement_precedes_the_round_trip_it_covers(self):
+        order = []
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "buildbox-map.json").write_text(
+                json.dumps(MirrorPaneTests.MAP), encoding="utf-8"
+            )
+
+            def runner(command):
+                order.append("ssh")
+                return _pane_list_reply({"pane_id": "w1:p1", "cwd": "/home/dev/x"})
+
+            plugin.resolve_mirror_location(
+                {"focused_pane_id": "w0:p2", "workspace_id": "w0"},
+                runner=runner,
+                state_dir=state,
+                hosts_file=Path("/nonexistent/hosts.toml"),
+                announce=lambda target: order.append("announce"),
+            )
+        self.assertEqual(order, ["announce", "ssh"])
+
+    def test_an_ordinary_pane_is_never_announced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            (state / "buildbox-map.json").write_text(
+                json.dumps(MirrorPaneTests.MAP), encoding="utf-8"
+            )
+            plugin.resolve_mirror_location(
+                {"focused_pane_id": "w3:p1", "workspace_id": "w3"},
+                runner=lambda command: "",
+                state_dir=state,
+                announce=lambda target: self.fail("announced a local pane"),
+            )
+
+
 class MirrorHostsFileTests(unittest.TestCase):
     def settings(self, body, host="mini"):
         with tempfile.TemporaryDirectory() as directory:

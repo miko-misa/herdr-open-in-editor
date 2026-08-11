@@ -93,6 +93,59 @@ def is_probably_remote_environment(env: dict[str, str] | None = None) -> bool:
     return any(source.get(name) for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"))
 
 
+def notification_command(
+    title: str,
+    body: str | None = None,
+    position: str = "bottom-left",
+    env: dict[str, str] | None = None,
+) -> list[str]:
+    """Argv for Herdr's own notification API.
+
+    `HERDR_BIN_PATH` is injected into every plugin command and names the binary
+    the running server came from, which is the one whose socket this should
+    reach; a bare `herdr` off the PATH could be a different install.
+    """
+    source = os.environ if env is None else env
+    binary = _nonempty_string(source.get("HERDR_BIN_PATH")) or "herdr"
+    command = [binary, "notification", "show", title, "--position", position]
+    if body:
+        command += ["--body", body]
+    return command
+
+
+def notify(
+    title: str,
+    body: str | None = None,
+    env: dict[str, str] | None = None,
+    runner: Callable[[list[str]], None] | None = None,
+) -> None:
+    """Show a Herdr notification, or carry on quietly if that fails.
+
+    Deliberately swallowing: this exists to say that a slow thing started, and
+    a toast that cannot be drawn is never a reason to fail the thing itself.
+    """
+    command = notification_command(title, body, env=env)
+    try:
+        if runner is not None:
+            runner(command)
+        else:
+            subprocess.run(command, capture_output=True, timeout=5, check=False)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
+def announce_remote_open(context: dict[str, Any], target: str) -> None:
+    """Say that a mirrored pane is being opened, before the wait starts.
+
+    Resolving the remote path is an SSH round trip and the editor then has its
+    own remote handshake to do, so several seconds pass with nothing on screen.
+    Herdr places this at the corner of the frame, which is where the user is
+    already looking for pane state.
+    """
+    label = _nonempty_string(context.get("workspace_label")) or target
+    notify(f"Opening {label}", f"{target} — this can take a few seconds")
+
+
 def load_mirror_maps(state_dir: Path | None = None) -> dict[str, dict[str, Any]]:
     """Read herdr-mirror's `<host>-map.json` state files, keyed by host name.
 
@@ -265,6 +318,7 @@ def resolve_mirror_location(
     runner: Callable[[list[str]], str] | None = None,
     state_dir: Path | None = None,
     hosts_file: Path | None = None,
+    announce: Callable[[str], None] | None = None,
 ) -> tuple[str, str] | None:
     """`(ssh target, remote path)` when the focused pane is a herdr-mirror pane.
 
@@ -287,6 +341,10 @@ def resolve_mirror_location(
         return None
     host, remote_pane_id = mirrored
     target, remote_herdr = mirror_host_settings(host, hosts_file)
+    # Before the round trip, not after: the round trip is most of the wait the
+    # announcement exists to cover.
+    if announce is not None:
+        announce(target)
     run = _run_remote_pane_list if runner is None else runner
     output = run(remote_pane_list_command(target, remote_herdr))
     return target, parse_remote_pane_cwd(output, remote_pane_id)
@@ -613,7 +671,17 @@ def run_request(args: argparse.Namespace) -> int:
     # here; a mirror pane is the reverse, a Herdr running here showing a pane
     # that lives on the far side. Handing a mirror's placeholder path to the
     # relay would open the wrong directory rather than fail.
-    mirrored = resolve_mirror_location(context)
+    try:
+        mirrored = resolve_mirror_location(
+            context,
+            announce=lambda target: announce_remote_open(context, target),
+        )
+    except OpenEditorError as error:
+        # Nothing else would say so. A keypress that resolves a mirrored pane
+        # writes its failure to the plugin log and stops, so on screen the
+        # action is indistinguishable from a key that is not bound at all.
+        notify("Could not open the mirrored pane", str(error))
+        raise
     if mirrored is not None:
         target, remote_path = mirrored
         editor = resolve_editor(args.editor)
