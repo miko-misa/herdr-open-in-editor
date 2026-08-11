@@ -184,6 +184,26 @@ Without herdr-mirror installed there is nothing to find, and an ordinary local
 workspace never reaches this path at all, so behaviour is unchanged and no SSH
 is attempted.
 
+### Feedback while it opens
+
+Unlike a local open, this one takes a moment — an SSH round trip for the path,
+then the editor's own remote handshake. Herdr is asked to show a notification
+before the wait starts, and again if it fails:
+
+```
+Opening mini: scholion
+mac-mini-honkoma — this can take a few seconds
+```
+
+The failure case matters more than it looks. Invoked from a keypress, a
+mirrored open that fails writes to the plugin log and stops, which on screen is
+indistinguishable from a key that was never bound.
+
+Set `delivery = "herdr"` under `[ui.toast]` to have these drawn in the corner
+of the Herdr frame; `"system"` sends them to the OS instead, and `"off"`
+suppresses them. Nothing here fails an open — a notification that cannot be
+shown is ignored.
+
 Three failures are worth recognising:
 
 - *herdr is not installed where … could find it* — neither the PATH nor
